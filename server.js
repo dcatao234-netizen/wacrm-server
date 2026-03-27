@@ -9,16 +9,20 @@ const app    = express();
 const server = http.createServer(app);
 
 // ══════════════════════════════════════════════
-// CONFIG
+// CONFIG — credenciais via variáveis de ambiente
 // ══════════════════════════════════════════════
 const PORT          = process.env.PORT          || 3000;
-const EVOLUTION_URL = process.env.EVOLUTION_URL || 'https://evolution-api-production-e06fe.up.railway.app';
-const EVOLUTION_KEY = process.env.EVOLUTION_KEY || '@Familia@';
+const EVOLUTION_URL = process.env.EVOLUTION_URL || '';
+const EVOLUTION_KEY = process.env.EVOLUTION_KEY || '';
 const INSTANCE      = process.env.INSTANCE_NAME || 'meu-whatsapp';
-const DATABASE_URL  = process.env.DATABASE_URL || 'postgresql://postgres:geecigwMqHiBGTussElRisotnzGauebb@ballast.proxy.rlwy.net:44165/railway';
+const DATABASE_URL  = process.env.DATABASE_URL  || '';
+
+if (!EVOLUTION_URL) console.warn('⚠️  EVOLUTION_URL não configurada — defina via variável de ambiente');
+if (!EVOLUTION_KEY) console.warn('⚠️  EVOLUTION_KEY não configurada — defina via variável de ambiente');
+if (!DATABASE_URL)  console.warn('⚠️  DATABASE_URL não configurada — rodando sem banco');
 const MY_URL        = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-  : process.env.MY_URL || 'https://wacrm-server-production-c61b.up.railway.app';
+  : process.env.MY_URL || 'https://wacrm-server-production.up.railway.app';
 
 // ══════════════════════════════════════════════
 // POSTGRES
@@ -85,6 +89,7 @@ async function initDB() {
     await seedQuickMessages();
     await initAgentes();
     await initConfig();
+    await initBotState();
   } catch(e) {
     console.error('❌ Erro ao inicializar banco:', e.message);
   }
@@ -178,6 +183,55 @@ app.get('/', async (req, res) => {
   });
 });
 
+function normalizeTs(value) {
+  const n = Number(value || 0);
+  if (!n) return Math.floor(Date.now() / 1000);
+  return n > 9999999999 ? Math.floor(n / 1000) : Math.floor(n);
+}
+
+function tsToTimeDate(ts) {
+  const d = new Date(normalizeTs(ts) * 1000);
+  return {
+    time: d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+    date: d.toLocaleDateString('pt-BR')
+  };
+}
+
+async function upsertMessage(convId, m) {
+  if (!m || typeof m !== 'object') return { inserted: false, timestamp: 0, id: null };
+  const ts = normalizeTs(m.timestamp);
+  const td = tsToTimeDate(ts);
+  const msgId = m.id || ('m' + Date.now() + Math.random().toString(16).slice(2, 6));
+  const result = await pool.query(`
+    INSERT INTO messages(id,conv_id,text,from_me,msg_time,msg_date,status,media_url,media_type,is_bot,timestamp)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+    ON CONFLICT(id) DO UPDATE SET
+      text      = COALESCE(NULLIF(EXCLUDED.text,''), messages.text),
+      from_me   = EXCLUDED.from_me,
+      msg_time  = COALESCE(NULLIF(EXCLUDED.msg_time,''), messages.msg_time),
+      msg_date  = COALESCE(NULLIF(EXCLUDED.msg_date,''), messages.msg_date),
+      status    = COALESCE(NULLIF(EXCLUDED.status,''), messages.status),
+      media_url = COALESCE(EXCLUDED.media_url, messages.media_url),
+      media_type= COALESCE(EXCLUDED.media_type, messages.media_type),
+      is_bot    = COALESCE(EXCLUDED.is_bot, messages.is_bot),
+      timestamp = GREATEST(EXCLUDED.timestamp, messages.timestamp)
+    RETURNING (xmax = 0) AS inserted
+  `, [
+    msgId,
+    convId,
+    m.text || '',
+    (m.from === 'out') || !!m.fromMe,
+    m.time || td.time,
+    m.date || td.date,
+    m.status || 'sent',
+    m.mediaUrl || null,
+    m.mediaType || null,
+    !!m.isBot,
+    ts
+  ]);
+  return { inserted: !!result.rows?.[0]?.inserted, timestamp: ts, id: msgId };
+}
+
 // ══════════════════════════════════════════════
 // DB ROUTES — Conversas
 // ══════════════════════════════════════════════
@@ -201,6 +255,7 @@ app.get('/db/conversas', async (req, res) => {
         date:     m.msg_date,
         status:   m.status,
         mediaUrl: m.media_url,
+        mediaType:m.media_type,
         isBot:    m.is_bot,
         timestamp:m.timestamp
       });
@@ -230,21 +285,45 @@ app.post('/db/conversas', async (req, res) => {
   if (!pool) return res.json({ ok: true });
   try {
     const c = req.body;
+    if (!c?.id) return res.json({ ok: true, skipped: true });
+
     await pool.query(`
       INSERT INTO conversations
         (id,phone,name,company,stage,color,agent_id,pinned,archived,unread,tags,notes,products,wa_id,last_ts,updated_at)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())
       ON CONFLICT(id) DO UPDATE SET
+        phone=COALESCE(EXCLUDED.phone, conversations.phone),
         name=EXCLUDED.name, stage=EXCLUDED.stage, color=EXCLUDED.color,
         agent_id=EXCLUDED.agent_id, pinned=EXCLUDED.pinned, archived=EXCLUDED.archived,
         unread=EXCLUDED.unread, tags=EXCLUDED.tags, notes=EXCLUDED.notes,
-        products=EXCLUDED.products, last_ts=EXCLUDED.last_ts, updated_at=NOW()
+        products=EXCLUDED.products, wa_id=COALESCE(EXCLUDED.wa_id, conversations.wa_id),
+        last_ts=GREATEST(EXCLUDED.last_ts, conversations.last_ts), updated_at=NOW()
     `, [
       c.id, c.phone, c.name, c.company||'', c.stage||'lead', c.color||'#25d366',
       c.agentId||null, c.pinned||false, c.archived||false, c.unread||0,
       JSON.stringify(c.tags||[]), JSON.stringify(c.notes||[]),
       JSON.stringify(c.products||[]), c.waId||null, c.lastTs||0
     ]);
+
+    if (Array.isArray(c.messages) && c.messages.length) {
+      let maxTs = 0;
+      // Salva apenas a cauda do histórico para reduzir carga sem perder mensagens recentes.
+      const toPersist = c.messages
+        .filter(m => m && typeof m === 'object')
+        .slice(-200);
+
+      for (const m of toPersist) {
+        const r = await upsertMessage(c.id, m);
+        if (r.timestamp > maxTs) maxTs = r.timestamp;
+      }
+      if (maxTs > 0) {
+        await pool.query(
+          'UPDATE conversations SET last_ts=GREATEST(last_ts,$1), updated_at=NOW() WHERE id=$2',
+          [maxTs, c.id]
+        );
+      }
+    }
+
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ erro: e.message }); }
 });
@@ -272,21 +351,7 @@ app.post('/db/mensagens', async (req, res) => {
       [convId, convId.replace('wa_','+')]
     );
 
-    for (const m of messages) {
-      await pool.query(`
-        INSERT INTO messages(id,conv_id,text,from_me,msg_time,msg_date,status,media_url,media_type,is_bot,timestamp)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-        ON CONFLICT(id) DO UPDATE SET
-          status=EXCLUDED.status, text=EXCLUDED.text,
-          from_me=EXCLUDED.from_me, media_url=COALESCE(EXCLUDED.media_url, messages.media_url),
-          media_type=COALESCE(EXCLUDED.media_type, messages.media_type)
-      `, [
-        m.id, convId, m.text||'', m.from==='out',
-        m.time||'', m.date||'', m.status||'sent',
-        m.mediaUrl||null, m.mediaType||null,
-        m.isBot||false, m.timestamp||0
-      ]);
-    }
+    for (const m of messages) await upsertMessage(convId, m);
     // Atualiza last_ts da conversa
     if (messages.length) {
       const lastTs = Math.max(...messages.map(m=>m.timestamp||0));
@@ -374,6 +439,25 @@ app.post('/enviar-midia', async (req, res) => {
     const r = await evo.post(`/message/sendMedia/${INSTANCE}`, {
       number: numero.replace(/\D/g,''), media, mediatype: mediatype||'image', caption: caption||''
     });
+
+    // Salva no banco para não sumir após refresh
+    if (pool && r.data?.key) {
+      const num  = numero.replace(/\D/g,'');
+      const cid  = 'wa_'+num;
+      await pool.query(
+        'INSERT INTO conversations(id,phone) VALUES($1,$2) ON CONFLICT DO NOTHING',
+        [cid, '+'+num]
+      ).catch(()=>{});
+      await upsertMessage(cid, {
+        id: r.data.key.id || ('m'+Date.now()),
+        text: caption || (mediatype === 'audio' ? '🎵 Áudio' : '📷 Imagem'),
+        from: 'out',
+        status: 'sent',
+        mediaType: mediatype || 'image',
+        timestamp: Math.floor(Date.now()/1000)
+      }).catch(()=>{});
+    }
+
     res.json({ sucesso: true, dados: r.data });
   } catch(e) { res.status(500).json({ sucesso: false, erro: e.message }); }
 });
@@ -381,6 +465,36 @@ app.post('/enviar-midia', async (req, res) => {
 app.get('/status', async (req, res) => {
   try { const r = await evo.get(`/instance/connectionState/${INSTANCE}`); res.json(r.data); }
   catch(e) { res.status(500).json({ erro: e.message }); }
+});
+
+// ══════════════════════════════════════════════
+// PROXY SEGURO — substitui chamadas diretas do frontend
+// ══════════════════════════════════════════════
+const EVO_ALLOWED_PATHS = [
+  '/chat/findChats/',
+  '/chat/findMessages/',
+  '/message/sendText/',
+  '/message/sendMedia/',
+  '/instance/connectionState/',
+];
+
+app.post('/evo-proxy', async (req, res) => {
+  try {
+    const { path, method, body } = req.body;
+    if (!path || typeof path !== 'string') {
+      return res.status(400).json({ erro: 'path obrigatório' });
+    }
+    // Validação: só permite caminhos na allowlist
+    if (!EVO_ALLOWED_PATHS.some(a => path.startsWith(a))) {
+      return res.status(403).json({ erro: 'Endpoint não permitido' });
+    }
+    const r = (method || '').toUpperCase() === 'GET'
+      ? await evo.get(path)
+      : await evo.post(path, body || {});
+    res.json(r.data);
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 // ══════════════════════════════════════════════
@@ -422,15 +536,20 @@ async function salvarMensagem(payload) {
         wa_id=EXCLUDED.wa_id, last_ts=EXCLUDED.last_ts, updated_at=NOW()
     `, [cid, '+'+payload.numero, payload.nome||'+'+payload.numero, payload.waId, payload.timestamp]);
 
-    // Insert mensagem
-    await pool.query(`
-      INSERT INTO messages(id,conv_id,text,from_me,msg_time,msg_date,status,media_url,media_type,timestamp)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(id) DO NOTHING
-    `, [payload.id, cid, payload.texto, payload.de==='out', payload.horario, 'Hoje', 'sent',
-        payload.mediaUrl||null, payload.mediaType||null, payload.timestamp]);
+    const msgRes = await upsertMessage(cid, {
+      id: payload.id,
+      text: payload.texto,
+      from: payload.de,
+      time: payload.horario,
+      date: 'Hoje',
+      status: 'sent',
+      mediaUrl: payload.mediaUrl || null,
+      mediaType: payload.mediaType || null,
+      timestamp: payload.timestamp || 0
+    });
 
-    // Incrementa unread se recebida
-    if (payload.de === 'in') {
+    // Incrementa unread apenas quando a mensagem entra pela primeira vez
+    if (payload.de === 'in' && msgRes.inserted) {
       await pool.query('UPDATE conversations SET unread=unread+1 WHERE id=$1', [cid]);
     }
   } catch(e) {
@@ -658,11 +777,12 @@ async function initAgentes() {
     // Cria admin padrão se não existir
     const { rows } = await pool.query("SELECT id FROM agents WHERE id='a1'");
     if (!rows.length) {
+      const adminPass = process.env.ADMIN_PASSWORD || 'admin123';
       await pool.query(
         "INSERT INTO agents(id,name,role,color,password) VALUES('a1','Admin','admin','#25d366',$1)",
-        [hashSenha('@Familia@')]
+        [hashSenha(adminPass)]
       );
-      console.log('✅ Admin criado — senha: @Familia@');
+      console.log('✅ Admin criado (senha definida via ADMIN_PASSWORD ou padrão)');
     }
   } catch(e) { console.error('Erro initAgentes:', e.message); }
 }
@@ -809,20 +929,10 @@ app.post('/sync/historico', async (req, res) => {
     console.log(`🔄 Sincronizando histórico de ${nome||remoteJid}...`);
 
     // Busca todas as mensagens da conversa na Evolution API
-    // Tenta buscar mensagens com remoteJid principal e com alt (@lid)
-    let r = await evo.post(`/chat/findMessages/${INSTANCE}`, {
+    const r = await evo.post(`/chat/findMessages/${INSTANCE}`, {
       where: { key: { remoteJid } },
       limit: 200
     });
-    
-    // Se não encontrou, tenta com remoteJidAlt
-    if ((!r.data?.messages?.records?.length) && req.body.remoteJidAlt && req.body.remoteJidAlt !== remoteJid) {
-      console.log(`Tentando com remoteJidAlt: ${req.body.remoteJidAlt}`);
-      r = await evo.post(`/chat/findMessages/${INSTANCE}`, {
-        where: { key: { remoteJid: req.body.remoteJidAlt } },
-        limit: 200
-      });
-    }
 
     const records = r.data?.messages?.records || r.data?.records || [];
     console.log(`📨 ${records.length} mensagens encontradas`);
@@ -834,8 +944,7 @@ app.post('/sync/historico', async (req, res) => {
       INSERT INTO conversations(id,phone,name,wa_id,last_ts,updated_at)
       VALUES($1,$2,$3,$4,$5,NOW())
       ON CONFLICT(id) DO UPDATE SET
-        name=CASE WHEN conversations.name IS NULL OR conversations.name='' OR conversations.name='Você' 
-             THEN EXCLUDED.name ELSE conversations.name END,
+        name=CASE WHEN conversations.name='' THEN EXCLUDED.name ELSE conversations.name END,
         wa_id=EXCLUDED.wa_id, last_ts=EXCLUDED.last_ts, updated_at=NOW()
     `, [convId, phone, nome||phone, remoteJid, Date.now()]);
 
@@ -868,16 +977,19 @@ app.post('/sync/historico', async (req, res) => {
         else if (msg.videoMessage) mediaType = 'video';
         else if (msg.documentMessage) mediaType = 'document';
 
-        await pool.query(`
-          INSERT INTO messages(id,conv_id,text,from_me,msg_time,msg_date,status,media_type,timestamp)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-          ON CONFLICT(id) DO NOTHING
-        `, [
-          m.key?.id || ('h'+Date.now()+Math.random()),
-          convId, texto, fromMe, time, 'Histórico',
-          'read', mediaType, ts
-        ]);
-        salvos++;
+        const mediaUrl = msg.imageMessage?.url || msg.audioMessage?.url || msg.videoMessage?.url || msg.documentMessage?.url || null;
+        const up = await upsertMessage(convId, {
+          id: m.key?.id || ('h'+Date.now()+Math.random()),
+          text: texto,
+          from: fromMe ? 'out' : 'in',
+          time,
+          date: d.toLocaleDateString('pt-BR'),
+          status: 'read',
+          mediaUrl,
+          mediaType,
+          timestamp: ts
+        });
+        if (up.inserted) salvos++;
       } catch(e) {}
     }
 
@@ -930,6 +1042,49 @@ app.post('/db/config', async (req, res) => {
         INSERT INTO config(key, value, updated_at) VALUES($1,$2,NOW())
         ON CONFLICT(key) DO UPDATE SET value=$2, updated_at=NOW()
       `, [key, JSON.stringify(value)]);
+    }
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ erro: e.message }); }
+});
+
+// ══════════════════════════════════════════════
+// BOT STATE — persistência do estado do chatbot por conversa
+// ══════════════════════════════════════════════
+async function initBotState() {
+  if (!pool) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS bot_state (
+      conv_id    TEXT PRIMARY KEY,
+      state      JSONB NOT NULL,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `).catch(e => console.error('initBotState:', e.message));
+  console.log('✅ Tabela bot_state OK');
+}
+
+app.get('/db/bot-state', async (req, res) => {
+  if (!pool) return res.json({});
+  try {
+    const { rows } = await pool.query('SELECT conv_id, state FROM bot_state');
+    const map = {};
+    rows.forEach(r => map[r.conv_id] = r.state);
+    res.json(map);
+  } catch(e) { res.status(500).json({ erro: e.message }); }
+});
+
+app.post('/db/bot-state', async (req, res) => {
+  if (!pool) return res.json({ ok: true });
+  try {
+    const entries = Object.entries(req.body);
+    for (const [convId, state] of entries) {
+      if (state === null) {
+        await pool.query('DELETE FROM bot_state WHERE conv_id=$1', [convId]);
+      } else {
+        await pool.query(`
+          INSERT INTO bot_state(conv_id, state, updated_at) VALUES($1,$2,NOW())
+          ON CONFLICT(conv_id) DO UPDATE SET state=$2, updated_at=NOW()
+        `, [convId, JSON.stringify(state)]);
+      }
     }
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ erro: e.message }); }
