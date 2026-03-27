@@ -12,15 +12,15 @@ const server = http.createServer(app);
 // ══════════════════════════════════════════════
 // CONFIG — credenciais via variáveis de ambiente
 // ══════════════════════════════════════════════
-const PORT          = process.env.PORT          || 3000;
+const PORT          = process.env.PORT || 3000;
 const EVOLUTION_URL = process.env.EVOLUTION_URL || '';
 const EVOLUTION_KEY = process.env.EVOLUTION_KEY || '';
 const INSTANCE      = process.env.INSTANCE_NAME || 'meu-whatsapp';
-const DATABASE_URL  = process.env.DATABASE_URL  || '';
+const DATABASE_URL  = process.env.DATABASE_URL || '';
 
-if (!EVOLUTION_URL) console.warn('⚠️  EVOLUTION_URL não configurada — defina via variável de ambiente');
-if (!EVOLUTION_KEY) console.warn('⚠️  EVOLUTION_KEY não configurada — defina via variável de ambiente');
-if (!DATABASE_URL)  console.warn('⚠️  DATABASE_URL não configurada — rodando sem banco');
+if (!EVOLUTION_URL) console.warn('⚠️ EVOLUTION_URL não configurada');
+if (!EVOLUTION_KEY) console.warn('⚠️ EVOLUTION_KEY não configurada');
+if (!DATABASE_URL)  console.warn('⚠️ DATABASE_URL não configurada — rodando sem banco');
 
 const MY_URL = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
@@ -38,7 +38,7 @@ const pool = DATABASE_URL
 
 async function initDB() {
   if (!pool) {
-    console.log('⚠️  Sem DATABASE_URL — rodando sem banco');
+    console.log('⚠️ Sem DATABASE_URL — rodando sem banco');
     return;
   }
 
@@ -106,16 +106,18 @@ async function initDB() {
 }
 
 async function seedQuickMessages() {
+  if (!pool) return;
+
   const { rows } = await pool.query('SELECT COUNT(*) FROM quick_messages');
   if (parseInt(rows[0].count) > 0) return;
 
   const defaults = [
-    ['q1','Boas-vindas','Olá! Seja bem-vindo(a)! 😊 Como posso te ajudar hoje?'],
-    ['q2','Aguardar','Um momento, por favor! Vou verificar isso agora mesmo.'],
-    ['q3','Proposta','Preparei uma proposta especial para você! Posso enviar?'],
-    ['q4','Fechamento','Para finalizar, poderia confirmar seus dados, por favor?'],
-    ['q5','Agradecimento','Muito obrigado pela confiança! 🙏 Estamos à disposição!'],
-    ['q6','Follow-up','Olá! Passando para verificar se ficou alguma dúvida. 😊'],
+    ['q1', 'Boas-vindas', 'Olá! Seja bem-vindo(a)! 😊 Como posso te ajudar hoje?'],
+    ['q2', 'Aguardar', 'Um momento, por favor! Vou verificar isso agora mesmo.'],
+    ['q3', 'Proposta', 'Preparei uma proposta especial para você! Posso enviar?'],
+    ['q4', 'Fechamento', 'Para finalizar, poderia confirmar seus dados, por favor?'],
+    ['q5', 'Agradecimento', 'Muito obrigado pela confiança! 🙏 Estamos à disposição!'],
+    ['q6', 'Follow-up', 'Olá! Passando para verificar se ficou alguma dúvida. 😊'],
   ];
 
   for (const [id, label, text] of defaults) {
@@ -188,7 +190,7 @@ function tsToTimeDate(ts) {
 }
 
 async function upsertMessage(convId, m) {
-  if (!m || typeof m !== 'object') {
+  if (!pool || !m || typeof m !== 'object') {
     return { inserted: false, timestamp: 0, id: null };
   }
 
@@ -236,7 +238,7 @@ function extrairTexto(msg) {
     || (msg.audioMessage    ? '🎵 Áudio'     : '')
     || (msg.videoMessage    ? '🎬 Vídeo'     : '')
     || (msg.documentMessage ? '📄 Documento' : '')
-    || (msg.stickerMessage  ? '🖼️ Sticker'  : '')
+    || (msg.stickerMessage  ? '🖼️ Sticker'   : '')
     || '';
 }
 
@@ -262,7 +264,7 @@ async function salvarMensagem(payload) {
       ON CONFLICT(id) DO UPDATE SET
         name = CASE WHEN conversations.name IS NULL OR conversations.name='' THEN EXCLUDED.name ELSE conversations.name END,
         wa_id = EXCLUDED.wa_id,
-        last_ts = EXCLUDED.last_ts,
+        last_ts = GREATEST(conversations.last_ts, EXCLUDED.last_ts),
         updated_at = NOW()
     `, [cid, '+' + payload.numero, payload.nome || '+' + payload.numero, payload.waId, payload.timestamp]);
 
@@ -288,7 +290,7 @@ async function salvarMensagem(payload) {
 
 async function fetchMediaBase64(m, midia, payload) {
   try {
-    console.log(`🖼️  Buscando mídia ${midia.type} para ${payload.numero}...`);
+    console.log(`🖼️ Buscando mídia ${midia.type} para ${payload.numero}...`);
 
     const mediaResp = await evo.post(`/chat/getBase64FromMediaMessage/${INSTANCE}`, {
       message: { key: m.key, message: m.message }
@@ -306,7 +308,7 @@ async function fetchMediaBase64(m, midia, payload) {
 
       console.log(`📡 Mídia re-emitida para ${io.engine.clientsCount} cliente(s)`);
     } else {
-      console.log('⚠️  Mídia sem base64 na resposta');
+      console.log('⚠️ Mídia sem base64 na resposta');
     }
   } catch (e) {
     console.log('❌ Mídia base64 erro:', e.message);
@@ -316,12 +318,13 @@ async function fetchMediaBase64(m, midia, payload) {
 function resolveEvolutionMethod(path, requestedMethod) {
   const cleanMethod = String(requestedMethod || '').toUpperCase();
 
-  if (path.startsWith('/chat/findChats/')) return 'GET';
-  if (path.startsWith('/instance/connectionState/')) return 'GET';
-
-  if (path.startsWith('/chat/findMessages/')) return cleanMethod || 'POST';
+  if (path.startsWith('/chat/findChats/')) return 'POST';
+  if (path.startsWith('/chat/findMessages/')) return 'POST';
   if (path.startsWith('/message/sendText/')) return 'POST';
   if (path.startsWith('/message/sendMedia/')) return 'POST';
+  if (path.startsWith('/chat/getBase64FromMediaMessage/')) return 'POST';
+  if (path.startsWith('/webhook/set/')) return 'POST';
+  if (path.startsWith('/instance/connectionState/')) return 'GET';
 
   return cleanMethod || 'POST';
 }
@@ -330,6 +333,17 @@ function resolveEvolutionMethod(path, requestedMethod) {
 // HEALTH CHECK
 // ══════════════════════════════════════════════
 app.get('/health', (req, res) => res.json({ ok: true }));
+
+app.get('/', async (req, res) => {
+  const dbOk = pool ? await pool.query('SELECT 1').then(() => true).catch(() => false) : false;
+  res.json({
+    status: '🟢 WA CRM Server v4',
+    instance: INSTANCE,
+    database: dbOk ? 'postgres ✅' : 'sem banco ⚠️',
+    clients: io.engine.clientsCount,
+    ts: new Date().toISOString()
+  });
+});
 
 app.get('/debug/msgs', async (req, res) => {
   if (!pool) return res.json({ erro: 'sem banco' });
@@ -345,23 +359,10 @@ app.get('/debug/msgs', async (req, res) => {
       GROUP BY c.id, c.name, c.phone
       ORDER BY total DESC
     `);
-
     res.json(rows);
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
-});
-
-app.get('/', async (req, res) => {
-  const dbOk = pool ? await pool.query('SELECT 1').then(() => true).catch(() => false) : false;
-
-  res.json({
-    status: '🟢 WA CRM Server v4',
-    instance: INSTANCE,
-    database: dbOk ? 'postgres ✅' : 'sem banco ⚠️',
-    clients: io.engine.clientsCount,
-    ts: new Date().toISOString()
-  });
 });
 
 // ══════════════════════════════════════════════
@@ -374,7 +375,6 @@ app.get('/db/conversas', async (req, res) => {
     const { rows: convs } = await pool.query(
       'SELECT * FROM conversations ORDER BY last_ts DESC, updated_at DESC'
     );
-
     const { rows: msgs } = await pool.query(
       'SELECT * FROM messages ORDER BY timestamp ASC'
     );
@@ -433,6 +433,7 @@ app.post('/db/conversas', async (req, res) => {
       ON CONFLICT(id) DO UPDATE SET
         phone=COALESCE(EXCLUDED.phone, conversations.phone),
         name=EXCLUDED.name,
+        company=EXCLUDED.company,
         stage=EXCLUDED.stage,
         color=EXCLUDED.color,
         agent_id=EXCLUDED.agent_id,
@@ -446,29 +447,15 @@ app.post('/db/conversas', async (req, res) => {
         last_ts=GREATEST(EXCLUDED.last_ts, conversations.last_ts),
         updated_at=NOW()
     `, [
-      c.id,
-      c.phone,
-      c.name,
-      c.company || '',
-      c.stage || 'lead',
-      c.color || '#25d366',
-      c.agentId || null,
-      c.pinned || false,
-      c.archived || false,
-      c.unread || 0,
-      JSON.stringify(c.tags || []),
-      JSON.stringify(c.notes || []),
-      JSON.stringify(c.products || []),
-      c.waId || null,
-      c.lastTs || 0
+      c.id, c.phone, c.name, c.company || '', c.stage || 'lead', c.color || '#25d366',
+      c.agentId || null, c.pinned || false, c.archived || false, c.unread || 0,
+      JSON.stringify(c.tags || []), JSON.stringify(c.notes || []),
+      JSON.stringify(c.products || []), c.waId || null, c.lastTs || 0
     ]);
 
     if (Array.isArray(c.messages) && c.messages.length) {
       let maxTs = 0;
-
-      const toPersist = c.messages
-        .filter(m => m && typeof m === 'object')
-        .slice(-200);
+      const toPersist = c.messages.filter(m => m && typeof m === 'object').slice(-200);
 
       for (const m of toPersist) {
         const r = await upsertMessage(c.id, m);
@@ -522,10 +509,7 @@ app.post('/db/mensagens', async (req, res) => {
     if (messages.length) {
       const lastTs = Math.max(...messages.map(m => m.timestamp || 0));
       if (lastTs > 0) {
-        await pool.query(
-          'UPDATE conversations SET last_ts=$1,updated_at=NOW() WHERE id=$2',
-          [lastTs, convId]
-        );
+        await pool.query('UPDATE conversations SET last_ts=$1,updated_at=NOW() WHERE id=$2', [lastTs, convId]);
       }
     }
 
@@ -580,10 +564,12 @@ app.delete('/db/quickmsgs/:id', async (req, res) => {
 // ══════════════════════════════════════════════
 app.post('/conversas', async (req, res) => {
   try {
-    const r = await evo.get(`/chat/findChats/${INSTANCE}`);
+    const r = await evo.post(`/chat/findChats/${INSTANCE}`, req.body || {});
     res.json(r.data);
   } catch (e) {
-    res.status(500).json({ erro: e.message });
+    res.status(e.response?.status || 500).json({
+      erro: e.response?.data || e.message
+    });
   }
 });
 
@@ -592,17 +578,16 @@ app.post('/mensagens', async (req, res) => {
     const r = await evo.post(`/chat/findMessages/${INSTANCE}`, req.body || {});
     res.json(r.data);
   } catch (e) {
-    res.status(500).json({ erro: e.message });
+    res.status(e.response?.status || 500).json({
+      erro: e.response?.data || e.message
+    });
   }
 });
 
 app.post('/enviar', async (req, res) => {
   try {
     const { numero, texto } = req.body;
-
-    if (!numero || !texto) {
-      return res.status(400).json({ erro: 'numero e texto obrigatórios' });
-    }
+    if (!numero || !texto) return res.status(400).json({ erro: 'numero e texto obrigatórios' });
 
     const r = await evo.post(`/message/sendText/${INSTANCE}`, {
       number: numero.replace(/\D/g, ''),
@@ -610,9 +595,9 @@ app.post('/enviar', async (req, res) => {
     });
 
     if (pool && r.data?.key) {
-      const num  = numero.replace(/\D/g, '');
-      const cid  = 'wa_' + num;
-      const now  = new Date();
+      const num = numero.replace(/\D/g, '');
+      const cid = 'wa_' + num;
+      const now = new Date();
       const time = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
       await pool.query(
@@ -628,17 +613,14 @@ app.post('/enviar', async (req, res) => {
 
     res.json({ sucesso: true, dados: r.data });
   } catch (e) {
-    res.status(500).json({ sucesso: false, erro: e.message });
+    res.status(e.response?.status || 500).json({ sucesso: false, erro: e.response?.data || e.message });
   }
 });
 
 app.post('/enviar-midia', async (req, res) => {
   try {
     const { numero, media, mediatype, caption } = req.body;
-
-    if (!numero || !media) {
-      return res.status(400).json({ erro: 'numero e media obrigatórios' });
-    }
+    if (!numero || !media) return res.status(400).json({ erro: 'numero e media obrigatórios' });
 
     const r = await evo.post(`/message/sendMedia/${INSTANCE}`, {
       number: numero.replace(/\D/g, ''),
@@ -648,8 +630,8 @@ app.post('/enviar-midia', async (req, res) => {
     });
 
     if (pool && r.data?.key) {
-      const num  = numero.replace(/\D/g, '');
-      const cid  = 'wa_' + num;
+      const num = numero.replace(/\D/g, '');
+      const cid = 'wa_' + num;
 
       await pool.query(
         'INSERT INTO conversations(id,phone) VALUES($1,$2) ON CONFLICT DO NOTHING',
@@ -668,7 +650,7 @@ app.post('/enviar-midia', async (req, res) => {
 
     res.json({ sucesso: true, dados: r.data });
   } catch (e) {
-    res.status(500).json({ sucesso: false, erro: e.message });
+    res.status(e.response?.status || 500).json({ sucesso: false, erro: e.response?.data || e.message });
   }
 });
 
@@ -677,7 +659,7 @@ app.get('/status', async (req, res) => {
     const r = await evo.get(`/instance/connectionState/${INSTANCE}`);
     res.json(r.data);
   } catch (e) {
-    res.status(500).json({ erro: e.message });
+    res.status(e.response?.status || 500).json({ erro: e.response?.data || e.message });
   }
 });
 
@@ -868,12 +850,12 @@ app.post('/configurar-webhook', async (req, res) => {
     console.log('✅ Webhook configurado:', url);
     res.json({ sucesso: true, url, dados: r.data });
   } catch (e) {
-    res.status(500).json({ sucesso: false, erro: e.message });
+    res.status(e.response?.status || 500).json({ sucesso: false, erro: e.response?.data || e.message });
   }
 });
 
 // ══════════════════════════════════════════════
-// AGENTES — rotas de autenticação
+// AGENTES — autenticação
 // ══════════════════════════════════════════════
 async function initAgentes() {
   if (!pool) return;
@@ -907,10 +889,7 @@ async function initAgentes() {
 
 app.post('/auth/login', async (req, res) => {
   const { agentId, senha } = req.body;
-
-  if (!pool) {
-    return res.status(503).json({ ok: false, erro: 'Banco não disponível' });
-  }
+  if (!pool) return res.status(503).json({ ok: false, erro: 'Banco não disponível' });
 
   try {
     const { rows } = await pool.query(
@@ -918,10 +897,7 @@ app.post('/auth/login', async (req, res) => {
       [agentId, hashSenha(senha)]
     );
 
-    if (!rows.length) {
-      return res.status(401).json({ ok: false, erro: 'Credenciais inválidas' });
-    }
-
+    if (!rows.length) return res.status(401).json({ ok: false, erro: 'Credenciais inválidas' });
     res.json({ ok: true, agent: rows[0] });
   } catch (e) {
     res.status(500).json({ ok: false, erro: e.message });
@@ -946,9 +922,7 @@ app.post('/auth/agentes', async (req, res) => {
 
   try {
     const { name, senha, role, color } = req.body;
-    if (!name || !senha) {
-      return res.status(400).json({ ok: false, erro: 'Nome e senha obrigatórios' });
-    }
+    if (!name || !senha) return res.status(400).json({ ok: false, erro: 'Nome e senha obrigatórios' });
 
     const id = 'a' + Date.now();
 
@@ -990,10 +964,7 @@ app.put('/auth/agentes/:id', async (req, res) => {
 
 app.delete('/auth/agentes/:id', async (req, res) => {
   if (!pool) return res.status(503).json({ ok: false });
-
-  if (req.params.id === 'a1') {
-    return res.status(403).json({ ok: false, erro: 'Não pode deletar o Admin' });
-  }
+  if (req.params.id === 'a1') return res.status(403).json({ ok: false, erro: 'Não pode deletar o Admin' });
 
   try {
     await pool.query('DELETE FROM agents WHERE id=$1', [req.params.id]);
@@ -1004,7 +975,7 @@ app.delete('/auth/agentes/:id', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
-// MEDIA BASE64 — busca mídia sob demanda
+// MEDIA BASE64
 // ══════════════════════════════════════════════
 app.post('/media/base64', async (req, res) => {
   try {
@@ -1015,24 +986,21 @@ app.post('/media/base64', async (req, res) => {
       message: { key, message }
     });
 
-    console.log('Resposta mídia:', r.data ? 'OK' : 'vazio');
-
     if (r.data?.base64) {
       res.json({ base64: r.data.base64, mime: r.data.mimetype || 'audio/ogg' });
     } else if (r.data?.mediaUrl) {
       res.json({ mediaUrl: r.data.mediaUrl, mime: r.data.mimetype || 'audio/ogg' });
     } else {
-      console.log('Resposta completa:', JSON.stringify(r.data).slice(0, 200));
       res.status(404).json({ erro: 'Mídia não encontrada na resposta' });
     }
   } catch (e) {
     console.error('Erro media/base64:', e.message);
-    res.status(500).json({ erro: e.message });
+    res.status(e.response?.status || 500).json({ erro: e.response?.data || e.message });
   }
 });
 
 // ══════════════════════════════════════════════
-// LIMPEZA — remove conversas inválidas do banco
+// LIMPEZA
 // ══════════════════════════════════════════════
 app.post('/db/limpar', async (req, res) => {
   if (!pool) return res.json({ ok: true });
@@ -1044,7 +1012,6 @@ app.post('/db/limpar', async (req, res) => {
     if (myPhone) {
       const phone = myPhone.replace(/\D/g, '');
       const last10 = phone.slice(-10);
-
       const r = await pool.query(
         "DELETE FROM conversations WHERE RIGHT(REPLACE(REPLACE(phone,'+',''),'-',''), 10) = $1",
         [last10]
@@ -1065,16 +1032,14 @@ app.post('/db/limpar', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
-// SYNC HISTÓRICO COMPLETO DA CONVERSA
+// SYNC HISTÓRICO
 // ══════════════════════════════════════════════
 app.post('/sync/historico', async (req, res) => {
   if (!pool) return res.json({ ok: false, erro: 'sem banco' });
 
   try {
     const { remoteJid, convId, nome, phone } = req.body;
-    if (!remoteJid) {
-      return res.status(400).json({ erro: 'remoteJid obrigatório' });
-    }
+    if (!remoteJid) return res.status(400).json({ erro: 'remoteJid obrigatório' });
 
     console.log(`🔄 Sincronizando histórico de ${nome || remoteJid}...`);
 
@@ -1094,12 +1059,11 @@ app.post('/sync/historico', async (req, res) => {
       ON CONFLICT(id) DO UPDATE SET
         name=CASE WHEN conversations.name='' THEN EXCLUDED.name ELSE conversations.name END,
         wa_id=EXCLUDED.wa_id,
-        last_ts=EXCLUDED.last_ts,
+        last_ts=GREATEST(conversations.last_ts, EXCLUDED.last_ts),
         updated_at=NOW()
     `, [convId, phone, nome || phone, remoteJid, Date.now()]);
 
     let salvos = 0;
-
     for (const m of records) {
       try {
         const msg = m.message || {};
@@ -1110,7 +1074,7 @@ app.post('/sync/historico', async (req, res) => {
           || (msg.audioMessage    ? '🎵 Áudio'     : '')
           || (msg.videoMessage    ? '🎬 Vídeo'     : '')
           || (msg.documentMessage ? '📄 Documento' : '')
-          || (msg.stickerMessage  ? '🖼️ Sticker'  : '')
+          || (msg.stickerMessage  ? '🖼️ Sticker'   : '')
           || '';
 
         if (!texto && !msg.imageMessage && !msg.audioMessage && !msg.videoMessage) continue;
@@ -1146,22 +1110,19 @@ app.post('/sync/historico', async (req, res) => {
 
     const maxTs = Math.max(...records.map(m => m.messageTimestamp || 0));
     if (maxTs > 0) {
-      await pool.query(
-        'UPDATE conversations SET last_ts=$1,updated_at=NOW() WHERE id=$2',
-        [maxTs, convId]
-      );
+      await pool.query('UPDATE conversations SET last_ts=$1,updated_at=NOW() WHERE id=$2', [maxTs, convId]);
     }
 
     console.log(`✅ ${salvos} mensagens salvas para ${nome}`);
     res.json({ ok: true, salvos, total: records.length });
   } catch (e) {
     console.error('Erro sync histórico:', e.message);
-    res.status(500).json({ erro: e.message });
+    res.status(e.response?.status || 500).json({ erro: e.response?.data || e.message });
   }
 });
 
 // ══════════════════════════════════════════════
-// CONFIGURAÇÕES GLOBAIS — tags, planos, chatbot
+// CONFIGURAÇÕES GLOBAIS
 // ══════════════════════════════════════════════
 async function initConfig() {
   if (!pool) return;
@@ -1195,14 +1156,12 @@ app.post('/db/config', async (req, res) => {
 
   try {
     const entries = Object.entries(req.body);
-
     for (const [key, value] of entries) {
       await pool.query(`
         INSERT INTO config(key, value, updated_at) VALUES($1,$2,NOW())
         ON CONFLICT(key) DO UPDATE SET value=$2, updated_at=NOW()
       `, [key, JSON.stringify(value)]);
     }
-
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -1210,7 +1169,7 @@ app.post('/db/config', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
-// BOT STATE — persistência do estado do chatbot por conversa
+// BOT STATE
 // ══════════════════════════════════════════════
 async function initBotState() {
   if (!pool) return;
@@ -1244,7 +1203,6 @@ app.post('/db/bot-state', async (req, res) => {
 
   try {
     const entries = Object.entries(req.body);
-
     for (const [convId, state] of entries) {
       if (state === null) {
         await pool.query('DELETE FROM bot_state WHERE conv_id=$1', [convId]);
@@ -1255,7 +1213,6 @@ app.post('/db/bot-state', async (req, res) => {
         `, [convId, JSON.stringify(state)]);
       }
     }
-
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -1279,7 +1236,7 @@ server.listen(PORT, async () => {
 
   setTimeout(async () => {
     if (!MY_URL) {
-      console.log('⚠️  MY_URL não configurado — webhook manual necessário');
+      console.log('⚠️ MY_URL não configurado — webhook manual necessário');
       return;
     }
 
@@ -1293,10 +1250,9 @@ server.listen(PORT, async () => {
           events: ['MESSAGES_UPSERT', 'MESSAGES_UPDATE', 'CONNECTION_UPDATE', 'SEND_MESSAGE']
         }
       });
-
       console.log(`✅ Webhook auto-configurado: ${MY_URL}/webhook`);
     } catch (e) {
-      console.log('⚠️  Auto-webhook falhou:', e.message);
+      console.log('⚠️ Auto-webhook falhou:', e.response?.data || e.message);
     }
   }, 5000);
 });
