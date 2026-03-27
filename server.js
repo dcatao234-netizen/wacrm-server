@@ -32,9 +32,18 @@ const MY_URL = process.env.RAILWAY_PUBLIC_DOMAIN
 const pool = DATABASE_URL
   ? new Pool({
       connectionString: DATABASE_URL,
-      ssl: { rejectUnauthorized: false }
+      ssl: { rejectUnauthorized: false },
+      max: 3,
+      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 10000
     })
   : null;
+
+if (pool) {
+  pool.on('error', (err) => {
+    console.error('❌ Erro inesperado no pool do Postgres:', err.message);
+  });
+}
 
 async function initDB() {
   if (!pool) {
@@ -311,7 +320,7 @@ async function fetchMediaBase64(m, midia, payload) {
       console.log('⚠️ Mídia sem base64 na resposta');
     }
   } catch (e) {
-    console.log('❌ Mídia base64 erro:', e.message);
+    console.log('❌ Mídia base64 erro:', e.response?.data || e.message);
   }
 }
 
@@ -994,7 +1003,7 @@ app.post('/media/base64', async (req, res) => {
       res.status(404).json({ erro: 'Mídia não encontrada na resposta' });
     }
   } catch (e) {
-    console.error('Erro media/base64:', e.message);
+    console.error('Erro media/base64:', e.response?.data || e.message);
     res.status(e.response?.status || 500).json({ erro: e.response?.data || e.message });
   }
 });
@@ -1116,7 +1125,7 @@ app.post('/sync/historico', async (req, res) => {
     console.log(`✅ ${salvos} mensagens salvas para ${nome}`);
     res.json({ ok: true, salvos, total: records.length });
   } catch (e) {
-    console.error('Erro sync histórico:', e.message);
+    console.error('Erro sync histórico:', e.response?.data || e.message);
     res.status(e.response?.status || 500).json({ erro: e.response?.data || e.message });
   }
 });
