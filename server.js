@@ -1075,6 +1075,25 @@ app.post('/db/reset-conversas', requireAdmin, async (req, res) => {
   }
 });
 
+// Limpa do banco conversas que NÃO estão no feed atual do WhatsApp
+app.post('/db/cleanup', async (req, res) => {
+  if (!pool) return res.json({ ok: true });
+  try {
+    const { keepIds } = req.body;
+    if (!Array.isArray(keepIds) || !keepIds.length) return res.json({ ok: true, deleted: 0 });
+    // Deleta conversas que não estão na lista E não são arquivadas
+    const placeholders = keepIds.map((_, i) => `$${i + 1}`).join(',');
+    const r = await pool.query(
+      `DELETE FROM conversations WHERE id NOT IN (${placeholders}) AND (archived = false OR archived IS NULL)`,
+      keepIds
+    );
+    console.log(`🧹 Cleanup: ${r.rowCount} conversas removidas (manteve ${keepIds.length})`);
+    res.json({ ok: true, deleted: r.rowCount });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 // ══════════════════════════════════════════════
 // SYNC HISTÓRICO
 // ══════════════════════════════════════════════
@@ -1084,6 +1103,13 @@ app.post('/sync/historico', async (req, res) => {
   try {
     const { remoteJid, convId, nome, phone } = req.body;
     if (!remoteJid) return res.status(400).json({ erro: 'remoteJid obrigatório' });
+
+    // Rejeita números inválidos (LIDs não resolvidos com > 15 dígitos)
+    const numCheck = (phone || '').replace(/\D/g, '');
+    if (numCheck.length > 15) {
+      console.log(`⏭️ Pulando sync de número inválido: ${phone}`);
+      return res.json({ ok: true, salvos: 0, skipped: 'número inválido' });
+    }
 
     console.log(`🔄 Sincronizando histórico de ${nome || remoteJid}...`);
 
