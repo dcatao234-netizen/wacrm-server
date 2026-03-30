@@ -1106,7 +1106,7 @@ app.post('/sync/historico', async (req, res) => {
 
     // Rejeita números inválidos (LIDs não resolvidos com > 15 dígitos)
     const numCheck = (phone || '').replace(/\D/g, '');
-    if (numCheck.length > 15) {
+    if (numCheck.length > 13) {
       console.log(`⏭️ Pulando sync de número inválido: ${phone}`);
       return res.json({ ok: true, salvos: 0, skipped: 'número inválido' });
     }
