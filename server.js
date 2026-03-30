@@ -1064,6 +1064,17 @@ app.post('/db/limpar', requireAdmin, async (req, res) => {
   }
 });
 
+app.post('/db/reset-conversas', requireAdmin, async (req, res) => {
+  if (!pool) return res.json({ ok: true });
+  try {
+    const r = await pool.query('DELETE FROM conversations');
+    console.log(`🔄 Reset: ${r.rowCount} conversas removidas do banco`);
+    res.json({ ok: true, deleted: r.rowCount });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 // ══════════════════════════════════════════════
 // SYNC HISTÓRICO
 // ══════════════════════════════════════════════
