@@ -33,8 +33,8 @@ const pool = DATABASE_URL
   ? new Pool({
       connectionString: DATABASE_URL,
       ssl: { rejectUnauthorized: false },
-      max: 1,
-      idleTimeoutMillis: 5000,
+      max: 5,
+      idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
       allowExitOnIdle: true
     })
@@ -165,6 +165,25 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// ══════════════════════════════════════════════
+// REQUIRE ADMIN MIDDLEWARE
+// ══════════════════════════════════════════════
+async function requireAdmin(req, res, next) {
+  const agentId = req.headers['x-agent-id'] || req.body?.agentId;
+  if (!agentId || !pool) return res.status(401).json({ ok: false, erro: 'Não autenticado' });
+  try {
+    const { rows } = await pool.query(
+      "SELECT role FROM agents WHERE id=$1 AND active=true", [agentId]
+    );
+    if (!rows.length || rows[0].role !== 'admin') {
+      return res.status(403).json({ ok: false, erro: 'Acesso restrito a admin' });
+    }
+    next();
+  } catch (e) {
+    res.status(500).json({ ok: false, erro: e.message });
+  }
+}
 
 // ══════════════════════════════════════════════
 // EVOLUTION API CLIENT
@@ -385,9 +404,15 @@ app.get('/db/conversas', async (req, res) => {
     const { rows: convs } = await pool.query(
       'SELECT * FROM conversations ORDER BY last_ts DESC, updated_at DESC'
     );
-    const { rows: msgs } = await pool.query(
-      'SELECT * FROM messages ORDER BY timestamp ASC'
-    );
+
+    // Carrega apenas as últimas 50 mensagens por conversa (evita estourar RAM)
+    const { rows: msgs } = await pool.query(`
+      SELECT * FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY conv_id ORDER BY timestamp DESC) AS rn
+        FROM messages
+      ) sub WHERE rn <= 50
+      ORDER BY timestamp ASC
+    `);
 
     const msgMap = {};
     msgs.forEach(m => {
@@ -817,12 +842,10 @@ function handleWebhook(req, res) {
 
         salvarMensagem(payload);
 
-        if (payload.de === 'in') {
-          io.emit('nova_mensagem', payload);
-          console.log(`📡 Emitido para ${io.engine.clientsCount} cliente(s)`);
-        } else {
-          console.log('💾 Salvo no banco (não emitido — enviado por nós)');
-        }
+        // Emite TODAS as mensagens (in e out) para o CRM
+        // Mensagens enviadas pelo celular (fromMe) também precisam aparecer no histórico
+        io.emit('nova_mensagem', payload);
+        console.log(`📡 Emitido para ${io.engine.clientsCount} cliente(s)`);
       } catch (e) {
         console.error('Erro processar msg:', e.message);
       }
@@ -1012,7 +1035,7 @@ app.post('/media/base64', async (req, res) => {
 // ══════════════════════════════════════════════
 // LIMPEZA
 // ══════════════════════════════════════════════
-app.post('/db/limpar', async (req, res) => {
+app.post('/db/limpar', requireAdmin, async (req, res) => {
   if (!pool) return res.json({ ok: true });
 
   try {
@@ -1161,7 +1184,7 @@ app.get('/db/config', async (req, res) => {
   }
 });
 
-app.post('/db/config', async (req, res) => {
+app.post('/db/config', requireAdmin, async (req, res) => {
   if (!pool) return res.json({ ok: true });
 
   try {
